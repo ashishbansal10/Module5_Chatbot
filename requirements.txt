@@ -1,66 +1,50 @@
 # -- basic -- 
-# --- Interactive & Visual (Jupyter Bridge) ---
-ipykernel>=6.30.1
-ipywidgets>=8.1.8
-jupyterlab_widgets>=3.0.16
+ipykernel
+ipywidgets
+jupyterlab_widgets
 
 # --- Core Data Stack ---
-numpy>=2.4.2
-pandas>=2.3.3
-statsmodels==0.14.6
+numpy
+pandas
 
 # --- Datasets ---
-datasets>=3.2.0
+datasets
 
 # --- Classical Machine Learning ---
-scikit-learn>=1.8.0
-xgboost==3.2.0
+scikit-learn
+xgboost
+statsmodels
 
 # --- Deep Learning (Verified 2026 Lock-step) ---
 # Local Dell (Intel) + Cloud (NVIDIA/CPU) Compatibility
 # Local Dell (Intel) + Cloud (NVIDIA/CPU) Compatibility
 --extra-index-url https://download.pytorch.org/whl/xpu
 --extra-index-url https://download.pytorch.org/whl/cu128
-torch>=2.10.0
-torchvision>=0.25.0
-torchaudio>=2.10.0
-torch-geometric>=2.7.0
-
-keras>=3.13.2
-tensorflow>=2.20.0
+torch
 
 # --- Optimization & Tuning ---
-optuna>=4.7.0
-keras-tuner>=1.4.8
+optuna
 
 # --- LLM & Hugging Face Ecosystem ---
-transformers>=5.0.0
-peft>=0.18.1
-trl>=0.29.0
-huggingface-hub>=1.4.1
-bitsandbytes>=0.49.0
-openai>=2.20.0
-sentence_transformers>=5.2.3
+transformers>=4.47.0
+peft
+trl
+huggingface-hub>=1.0.0
+bitsandbytes
+accelerate
+openai
+sentence_transformers
 
 # --- Metrics ---
 evaluate
 rouge_score
 sacrebleu
 
-# --- Agentic Orchestration ---
-langchain>=1.2.10
-langgraph>=1.0.8
-instructor>=1.14.5
-pydantic>=2.12.5
-
 # --- Visualization & Media ---
-matplotlib>=3.10.8
-seaborn>=0.13.2
-tqdm>=4.67.0
+matplotlib
+seaborn
+tqdm
 squarify
-ffmpeg-python>=0.2.0
-ffmpeg-binaries>=1.1.0
 
 # --- AI UI ---
-gradio>=6.5.1
-
+gradio
