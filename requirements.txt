@@ -18,6 +18,9 @@ xgboost==3.2.0
 
 # --- Deep Learning (Verified 2026 Lock-step) ---
 # Local Dell (Intel) + Cloud (NVIDIA/CPU) Compatibility
+# Local Dell (Intel) + Cloud (NVIDIA/CPU) Compatibility
+--extra-index-url https://download.pytorch.org/whl/xpu
+--extra-index-url https://download.pytorch.org/whl/cu128
 torch>=2.10.0
 torchvision>=0.25.0
 torchaudio>=2.10.0
@@ -60,3 +63,4 @@ ffmpeg-binaries>=1.1.0
 
 # --- AI UI ---
 gradio>=6.5.1
+
