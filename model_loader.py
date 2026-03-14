@@ -25,22 +25,37 @@ from peft import (
     PeftModel
 )
 from trl import SFTConfig, SFTTrainer
+from dataclasses import dataclass
 
 
 # Public API - Cleanly separated
 __all__ = [
+    # Configs
     "CHAT_STYLE_CONFIG",
     "MODEL_CONFIGS",
+
+    # model pipeline
     "resolve_model_dtype_and_device",
     "update_model_and_tokenizer",
     "load_model_and_tokenizer",
+
+    # prompt pipeline
+    "build_prompt",
+    "get_stop_strings",
+    "tokenize_and_mask",
     "prepare_chatbot_dataset",
+
+    # training pipeline
     "apply_llm_finetune_strategy",
     "setup_training_engine",
     "run_training_engine",
     "save_training_results",
+
+    # stats utils
     "print_training_summary",
     "plot_training_results",
+
+    # inference pipeline
     "load_inference_model"
 ]
 
@@ -167,7 +182,7 @@ MODEL_CONFIGS = {
 }
 
 
-def resolve_model_dtype_and_device(device):
+def resolve_model_dtype_and_device(device = torch.device("cpu")):
     """
     Shared helper — used by both load_model_and_tokenizer
     and load_inference_model.
@@ -183,15 +198,20 @@ def resolve_model_dtype_and_device(device):
     return model_dtype, device_map
 
 
-def update_model_and_tokenizer(model, model_config, tokenizer, debug=False):
+def update_model_and_tokenizer(
+    model,
+    tokenizer,
+    model_config,
+    debug = False
+):
     """
     Safely updates model and tokenizer with custom special tokens.
     Behavior is driven by chat_style in model_config.
     
     Args:
         model:        The loaded HuggingFace model.
-        model_config: The model config dict (from MODEL_CONFIGS).
         tokenizer:    The loaded HuggingFace tokenizer.
+        model_config: The model config dict (from MODEL_CONFIGS).
         debug (bool): If True, prints additional debug information.
     """
     chat_style = model_config.get("chat_style")
@@ -373,7 +393,12 @@ def update_model_and_tokenizer(model, model_config, tokenizer, debug=False):
     return model, tokenizer
 
 
-def load_model_and_tokenizer(model_id, model_config, device, debug=False):
+def load_model_and_tokenizer(
+    model_id,
+    model_config,
+    device = torch.device("cpu"),
+    debug  = False
+):
     """
     Loads model and tokenizer, then updates special tokens
     based on chat_style in model_config.
@@ -473,8 +498,8 @@ def load_model_and_tokenizer(model_id, model_config, device, debug=False):
     # ----------------------------------------------------------------
     model, tokenizer = update_model_and_tokenizer(
         model=model,
-        model_config=model_config,
         tokenizer=tokenizer,
+        model_config=model_config,
         debug=debug
     )
 
@@ -497,10 +522,403 @@ def load_model_and_tokenizer(model_id, model_config, device, debug=False):
     return model, tokenizer
 
 
-def prepare_chatbot_dataset(
-    dataset_dict,
-    model_config,
+@dataclass
+class PromptParts:
+    prompt:    str        # prompt only — inference uses this, training uses for mask boundary
+    full_text: str | None # prompt + response suffix — training only, None in inference mode
+
+
+def build_prompt(
     tokenizer,
+    model_config: dict,
+    query:        str,
+    reference:    str | None = None,
+    history:      list[tuple[str, str]] | None = None,
+) -> PromptParts:
+    """
+    Build the correctly formatted prompt for a single sample.
+    Single source of truth for prompt formatting — used by both
+    prepare_chatbot_dataset (training) and inference_engine (inference).
+
+    Args:
+        tokenizer    : Loaded HuggingFace tokenizer — needed for bos/eos tokens
+                        and for native apply_chat_template.
+        model_config : One entry from MODEL_CONFIGS, e.g. MODEL_CONFIGS["distilgpt2"].
+        query        : The user / customer message.
+        response     : The assistant / agent answer.
+                        None → inference mode: PromptParts(prompt="...", full_text=None)
+                        str  → training mode:  PromptParts(prompt="...", full_text="...")
+        history      : Optional prior turns as [(user, assistant), ...].
+                        NOTE: only meaningful for native/chatml styles. For
+                        conversational/simple_qa the model was not trained on
+                        chained exchanges — use with caution.
+ 
+    Returns:
+        PromptParts
+            .prompt    — always populated, ready for model.generate()
+            .full_text — populated in training mode, None in inference mode
+    """
+    chat_style    = model_config["chat_style"]
+    style_cfg     = CHAT_STYLE_CONFIG[chat_style]
+    system_prompt = model_config.get("system_prompt", None)
+ 
+    # Silently drop system_prompt if the style does not support it
+    # (matches the existing behaviour in prepare_chatbot_dataset)
+    if system_prompt and not style_cfg["supports_system_prompt"]:
+        system_prompt = None
+ 
+    bos = tokenizer.bos_token or ""
+    eos = tokenizer.eos_token or ""
+ 
+    # ── native: tokenizer.apply_chat_template ────────────────
+    if style_cfg["use_native_template"]:
+        return _build_native(
+            query, reference, system_prompt, history, tokenizer
+        )
+ 
+    # ── template-based styles ─────────────────────────────────
+    return _build_template(
+        query, reference, system_prompt, history, style_cfg["template"], bos, eos
+    )
+
+
+def _build_native(query, reference, system_prompt, history, tokenizer):
+    """Internal helper — native apply_chat_template path."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+ 
+    if history:
+        for user_msg, assistant_msg in history:
+            messages.append({"role": "user",      "content": user_msg.strip()})
+            messages.append({"role": "assistant", "content": assistant_msg.strip()})
+ 
+    messages.append({"role": "user", "content": query.strip()})
+ 
+    # Prompt always built the same way — with generation prompt so mask boundary is correct
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize              = False,
+        add_generation_prompt = True,
+    )
+
+    if reference is None:
+        # Inference mode
+        return PromptParts(prompt=prompt, full_text=None)
+ 
+    # Training mode — full text with assistant response appended
+    full_messages = messages + [{"role": "assistant", "content": reference.strip()}]
+    full_text = tokenizer.apply_chat_template(
+        full_messages,
+        tokenize              = False,
+        add_generation_prompt = False,
+    )
+    return PromptParts(prompt=prompt, full_text=full_text)
+ 
+ 
+def _build_template(query, reference, system_prompt, history, template, bos, eos):
+    """Internal helper — explicit prefix/suffix template path."""
+    prompt = ""
+ 
+    # System block — only prepended once, before any history
+    if system_prompt and template.get("system"):
+        prompt += template["system"].format(system=system_prompt, bos=bos, eos=eos)
+ 
+    # Prior turns: each is a complete prefix + suffix pair
+    if history:
+        for user_msg, assistant_msg in history:
+            turn_prefix = template["prefix"].format(
+                input=user_msg.strip(), bos=bos, eos=eos
+            )
+            turn_suffix = template["suffix"].format(
+                output=assistant_msg.strip(), bos=bos, eos=eos
+            )
+            prompt += turn_prefix + turn_suffix
+ 
+    # Current query prefix (no suffix — model generates it)
+    prompt += template["prefix"].format(input=query.strip(), bos=bos, eos=eos)
+ 
+    if reference is None:
+        # Inference mode
+        return PromptParts(prompt=prompt, full_text=None)
+ 
+    # Training mode — append response suffix
+    suffix    = template["suffix"].format(output=reference.strip(), bos=bos, eos=eos)
+    full_text = prompt + suffix
+    return PromptParts(prompt=prompt, full_text=full_text)
+ 
+ 
+def get_stop_strings(tokenizer, model_config: dict) -> list[str]:
+    """
+    Derive the list of strings at which generation should be cut off.
+ 
+    These are extracted from CHAT_STYLE_CONFIG so they always stay
+    in sync with the training format — no hardcoding.
+ 
+    Logic:
+        The leading literal text in the prefix template (the part before
+        {input}) is what the model would generate if it started a new
+        user turn on its own.  That is the correct stop boundary.
+ 
+    Examples:
+        --------
+        conversational  →  ["Customer:"]
+        simple_qa       →  ["Question:"]
+        alpaca          →  ["### Instruction:"]
+        chatml          →  ["<bos_token>user"]   (resolved at runtime)
+        native          →  [eos_token, "<|im_start|>user", "<|user|>", "[INST]"]
+    """
+    chat_style = model_config["chat_style"]
+    style_cfg  = CHAT_STYLE_CONFIG[chat_style]
+    bos        = tokenizer.bos_token or ""
+    eos        = tokenizer.eos_token or ""
+ 
+    if style_cfg["use_native_template"]:
+        # For native styles the eos token is the primary stop.
+        # We add common role-opening markers as safety stops because
+        # some native templates (TinyLlama) use <|im_start|>user
+        # and others use [INST] — we can't know without rendering.
+        stops = []
+        if eos:
+            stops.append(eos)
+        stops += ["<|im_start|>user", "<|user|>", "[INST]"]
+        return [s for s in stops if s]
+ 
+    template = style_cfg["template"]
+ 
+    # Resolve the prefix with a sentinel to extract the leading literal
+    sentinel   = "<<<SPLIT>>>"
+    prefix_raw = template["prefix"].format(input=sentinel, bos=bos, eos=eos)
+    leading    = prefix_raw.split(sentinel)[0].rstrip()
+ 
+    stops = []
+    if leading:
+        stops.append(leading)
+ 
+    # eos is always a hard stop
+    if eos and eos not in stops:
+        stops.append(eos)
+ 
+    return [s for s in stops if s]
+ 
+ 
+def tokenize_and_mask(
+    tokenizer,
+    prompt_text: str,
+    full_text:   str,
+    max_length:  int = 1024,
+) -> dict:
+    """
+    Tokenise full_text and mask the prompt portion with -100 in labels.
+ 
+    Args:
+        prompt_text (str): The prompt-only string (used to measure mask length).
+        full_text   (str): The complete string prompt + response (model input).
+        tokenizer        : HuggingFace tokenizer.
+        max_length  (int): Token truncation limit.
+ 
+    Returns:
+        dict with keys: input_ids, attention_mask, labels
+        Labels have -100 for all prompt tokens (no loss on prompt).
+    """
+    full_enc = tokenizer(
+        full_text,
+        max_length     = max_length,
+        truncation     = True,
+        padding        = False,
+        return_tensors = None,
+    )
+ 
+    prompt_enc = tokenizer(
+        prompt_text,
+        max_length         = max_length,
+        truncation         = True,
+        padding            = False,
+        return_tensors     = None,
+        add_special_tokens = False,   # avoid double BOS at the boundary
+    )
+ 
+    input_ids      = full_enc["input_ids"]
+    attention_mask = full_enc["attention_mask"]
+    prompt_len     = len(prompt_enc["input_ids"])
+ 
+    labels              = input_ids.copy()
+    labels[:prompt_len] = [-100] * prompt_len
+
+    # Safety — response fully truncated edge case
+    if all(l == -100 for l in labels):
+        print(
+            "⚠️  All tokens masked after truncation — "
+            "response may be fully truncated. Consider increasing max_length."
+        )
+
+    return {
+        "input_ids":      input_ids,
+        "attention_mask": attention_mask,
+        "labels":         labels,
+    }
+
+
+def prepare_chatbot_dataset(
+    tokenizer,
+    model_config,
+    dataset_dict,
+    max_length       = 1024,
+    do_label_masking = True,
+    debug            = False
+):
+    """
+    Factory function that formats a DatasetDict into the correct chat style.
+    Optionally applies label masking — loss computed on response tokens only.
+  
+    Args:
+        tokenizer                      : Loaded and updated HuggingFace tokenizer.
+        model_config     (dict)        : Entry from MODEL_CONFIGS.
+        dataset_dict     (DatasetDict) : Raw dataset with at least a 'train' split.
+        max_length       (int)         : Max token length.  Default: 1024.
+        do_label_masking (bool)        : True  → input_ids, attention_mask, labels. masks prompt tokens in labels.
+                                         False → text only. Loss computed on full text (baseline).
+        debug            (bool)        : Print additional debug information.
+ 
+    Returns:
+        DatasetDict: DatasetDict with columns depending on do_label_masking (see above).
+    """
+ 
+    # ----------------------------------------------------------------
+    # Step 1: Early validation
+    # ----------------------------------------------------------------
+    assert dataset_dict is not None, \
+        "❌ dataset_dict is None!"
+
+    # Only train is mandatory to check, test/val may or may not be present
+    assert "train" in dataset_dict, \
+        "❌ dataset_dict missing 'train' split!"
+ 
+    chat_style = model_config.get("chat_style")
+    style_cfg  = CHAT_STYLE_CONFIG.get(chat_style)
+ 
+    if style_cfg is None:
+        raise ValueError(
+            f"❌ Unknown chat_style: '{chat_style}'. "
+            f"Must be one of {list(CHAT_STYLE_CONFIG.keys())}."
+        )
+ 
+    # Validate dataset has required columns
+    input_col  = style_cfg["input"]   # "prompt"
+    output_col = style_cfg["output"]  # "response"
+ 
+    for split in dataset_dict.keys():
+        assert input_col in dataset_dict[split].column_names, \
+            f"❌ Input column '{input_col}' not found in '{split}' split!"
+        assert output_col in dataset_dict[split].column_names, \
+            f"❌ Output column '{output_col}' not found in '{split}' split!"
+ 
+    # Validate native style has chat_template
+    if style_cfg["use_native_template"]:
+        assert tokenizer.chat_template is not None, \
+            "❌ chat_style='native' but tokenizer has no built-in chat_template!"
+ 
+    # Validate that after bos/eos would be known:
+    if not style_cfg["use_native_template"] and style_cfg["requires_special_tokens"]:
+        assert tokenizer.bos_token not in (None, ""), \
+            f"❌ chat_style='{chat_style}' requires bos_token but it is not set!"
+        assert tokenizer.eos_token not in (None, ""), \
+            f"❌ chat_style='{chat_style}' requires eos_token but it is not set!"
+
+    # Warn if system_prompt set but style doesn't support it
+    system_prompt = model_config.get("system_prompt")
+    if system_prompt and not style_cfg["supports_system_prompt"]:
+        print(
+            f"⚠️  system_prompt set but chat_style='{chat_style}' "
+            f"does not support it — ignoring."
+        )
+ 
+    print(f"\n{'='*50}")
+    print(f"🛠️  prepare_chatbot_dataset")
+    print(f"   chat_style       : {chat_style}")
+    print(f"   input_col        : {input_col}")
+    print(f"   output_col       : {output_col}")
+    print(f"   system_prompt    : {system_prompt}")
+    print(f"   max_length       : {max_length}")
+    print(f"   do_label_masking : {do_label_masking}")
+    print(f"{'='*50}")
+ 
+    # ----------------------------------------------------------------
+    # Step 2: Apply formatter
+    # This is the function passed to dataset.map()
+    # build_prompt called once per example — HF .map handles the loop.
+    # response=row[output_col] → training mode → PromptParts(prompt, full_text)
+    # full_text is guaranteed non-None here since response is always provided.
+    # ----------------------------------------------------------------
+
+    def formatter(example):
+        parts = build_prompt(
+            tokenizer    = tokenizer,
+            model_config = model_config,
+            query        = example[input_col],
+            reference    = example[output_col],
+        )
+        if do_label_masking:
+            return tokenize_and_mask(
+                tokenizer   = tokenizer,
+                prompt_text = parts.prompt,
+                full_text   = parts.full_text,
+                max_length  = max_length,
+            )
+        else:
+            return {"text": parts.full_text}
+ 
+    processed_dataset = dataset_dict.map(
+        formatter,
+        desc           = f"Formatting {'+ masking ' if do_label_masking else ''}[{chat_style}]",
+        remove_columns = next(iter(dataset_dict.values())).column_names,
+    )
+ 
+    # ----------------------------------------------------------------
+    # Step 3: Debug preview — one sample per split
+    # ----------------------------------------------------------------
+    if debug:
+        print(f"\n🚀 DATA PREVIEW")
+        print(f"{'='*60}")
+        for split in processed_dataset.keys():
+            example = processed_dataset[split][0]
+            if do_label_masking:
+                input_ids        = example["input_ids"]
+                labels           = example["labels"]
+                full_decoded     = tokenizer.decode(input_ids,    skip_special_tokens=False)
+                response_ids     = [t for t, l in zip(input_ids, labels) if l != -100]
+                response_decoded = tokenizer.decode(response_ids, skip_special_tokens=False)
+                n_masked         = sum(1 for l in labels if l == -100)
+                n_unmasked       = sum(1 for l in labels if l != -100)
+                print(f"--- {split.upper()} SAMPLE 1 (masking ON) ---")
+                print(f"【full text decoded】 :\n{full_decoded}")
+                print(f"【response only】     :\n{response_decoded}")
+                print(f"【token counts】      : total={len(input_ids)}, masked={n_masked}, unmasked={n_unmasked}")
+                print(f"【masking ratio】     : {n_masked/len(input_ids)*100:.1f}% masked")
+            else:
+                tokens = tokenizer(example["text"], return_tensors="pt")
+                print(f"--- {split.upper()} SAMPLE 1 (masking OFF) ---")
+                print(f"【text】        :\n{example['text']}")
+                print(f"【token count】 : {tokens['input_ids'].shape[1]}")
+            print(f"{'='*60}")
+        print(f"\n[DEBUG] Columns after cleanup: {processed_dataset['train'].column_names}")
+ 
+    # ----------------------------------------------------------------
+    # Step 4: Summary
+    # ----------------------------------------------------------------
+    print(f"\n✅ Dataset ready")
+    for split in processed_dataset.keys():
+        print(f"   📊 {split:<10} : {len(processed_dataset[split])} rows")
+    print(f"   columns          : {processed_dataset['train'].column_names}")
+    print(f"{'='*50}\n")
+
+    return processed_dataset
+
+
+def _old_prepare_chatbot_dataset(
+    tokenizer,
+    model_config,
+    dataset_dict,
     max_length       = 1024,
     do_label_masking = True,
     debug            = False
@@ -510,9 +928,9 @@ def prepare_chatbot_dataset(
     Optionally applies label masking — loss computed on response tokens only.
 
     Args:
-        dataset_dict     (DatasetDict): Raw dataset with at least 'train' split.
-        model_config     (dict):        Model config from MODEL_CONFIGS.
         tokenizer:                      The loaded and updated HuggingFace tokenizer.
+        model_config     (dict):        Model config from MODEL_CONFIGS.
+        dataset_dict     (DatasetDict): Raw dataset with at least 'train' split.
         max_length       (int):         Max token length. Default: 1024.
         do_label_masking (bool):        If True, masks prompt tokens in labels.
                                         If False, loss computed on full text (baseline).
@@ -770,7 +1188,13 @@ def prepare_chatbot_dataset(
     return processed_dataset
 
 
-def apply_llm_finetune_strategy(model, model_config, strategy_name="lora", hp_overrides=None, debug=False):
+def apply_llm_finetune_strategy(
+    model,
+    model_config,
+    strategy_name = "lora",
+    hp_overrides  = None,
+    debug         = False
+):
     """
     Module 3: Applies fine-tuning strategy to model.
     Currently supported strategies: ['lora']
@@ -778,7 +1202,7 @@ def apply_llm_finetune_strategy(model, model_config, strategy_name="lora", hp_ov
     Args:
         model         (nn.Module): The loaded HuggingFace model.
         model_config  (dict):      Model config from MODEL_CONFIGS.
-        strategy_name (str):       Fine-tuning strategy. Default: 'lora'.
+        strategy_name (str):       Fine-tuning strategy. Default: 'lora'. currently supported: ['lora'].
         hp_overrides  (dict):      Optional hyperparameter overrides.
         debug         (bool):      If True, prints additional debug info.
 
@@ -886,10 +1310,10 @@ def apply_llm_finetune_strategy(model, model_config, strategy_name="lora", hp_ov
 def setup_training_engine(
     model,
     tokenizer,
-    dataset,
     model_config,
     peft_config,
-    device,
+    dataset,
+    device           = torch.device("cpu"),
     hp_overrides     = None,
     seed             = None,
     output_dir       = "./results",
@@ -903,9 +1327,9 @@ def setup_training_engine(
     Args:
         model            (nn.Module):    The loaded and LoRA-wrapped model.
         tokenizer:                       The loaded and updated tokenizer.
-        dataset          (DatasetDict):  Processed dataset with at least 'train' split.
         model_config     (dict):         Model config from MODEL_CONFIGS.
         peft_config      (LoraConfig):   PEFT config from apply_llm_finetune_strategy.
+        dataset          (DatasetDict):  Processed dataset with at least 'train' split.
         device           (torch.device): Execution device (e.g. 'cuda', 'cpu').
         hp_overrides     (dict):         Optional hyperparameter overrides.
                                          Friendly keys: batch_size etc.
@@ -1092,7 +1516,7 @@ def setup_training_engine(
 
 def run_training_engine(
     trainer,
-    device,
+    device       = torch.device("cpu"),
     hp_overrides = None,
     debug        = False
 ):
@@ -1395,9 +1819,9 @@ def plot_training_results(trainer):
 def load_inference_model(
     model_name,
     best_model_path,
-    device,
+    device       = torch.device("cpu"),
     load_adapter = True,
-    debug = False
+    debug        = False
 ):
     """
     Reloads base model and attaches trained LoRA adapters for inference.
