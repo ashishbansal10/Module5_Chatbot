@@ -414,6 +414,7 @@ def load_model_and_tokenizer(model_id, model_config, device, debug=False):
     # ✅ Use bfloat16/float16 on CUDA for efficiency
     # ✅ Respect device arg — don't override CPU with auto
     model_dtype, device_map = resolve_model_dtype_and_device(device)
+    is_cuda = device.type == "cuda" and torch.cuda.is_available()
 
     # ----------------------------------------------------------------
     # Step 3: Load tokenizer
