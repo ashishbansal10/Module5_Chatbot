@@ -32,8 +32,7 @@ __all__ = [
     "sampling_report",
     "split_data",
     "save_sampled_data",
-    "save_splits",
-    "collect_generated_files"
+    "save_splits"
 ]
 
 # ============================================================
@@ -81,17 +80,16 @@ def load_data(dataset_name):
 # ============================================================
 # 2: ANALYSIS
 # ============================================================
-def analyze_data(df, dataset_name):
+def analyze_data(df, base_name):
     """
     Prints basic dataset statistics and plots intent distribution.
     Saves plot to <basename>.analysis.png and displays inline.
 
     Args:
-        df           (pd.DataFrame): Cleaned DataFrame.
-        dataset_name (str):          Dataset name for file naming.
+        df        (pd.DataFrame): Cleaned DataFrame.
+        base_name (str):          Dataset name for file naming.
     """
-    base       = get_file_basename(dataset_name)
-    plot_file  = f"{base}.analysis.png"
+    plot_file  = f"{base_name}.analysis.png"
     intent_col = "intent"
 
     print(f"{'='*50}")
@@ -120,7 +118,7 @@ def analyze_data(df, dataset_name):
     std_count     = intent_counts.std()
 
     fig, axes = plt.subplots(1, 2, figsize=(18, max(6, n_intents * 0.25)))
-    fig.suptitle(f"Intent Distribution — {base.upper()}", fontsize=14)
+    fig.suptitle(f"Intent Distribution — {base_name}", fontsize=14)
 
     axes[0].barh(intent_counts.index, intent_counts.values, color="steelblue", alpha=0.8)
     axes[0].axvline(mean_count, color="red",    linestyle="--", label=f"Mean={mean_count:.0f}")
@@ -199,7 +197,7 @@ def _compute_data_hash(df, dataset_name):
     return hashlib.md5(combined.encode()).hexdigest()[:8]
 
 
-def semantic_analysis(df, dataset_name, device="cuda", target_cluster_size=50, min_clusters=2, max_clusters=20):
+def semantic_analysis(df, dataset_name, base_name, device="cuda", target_cluster_size=50, min_clusters=2, max_clusters=20):
     """
     Encodes queries, L2-normalizes, and clusters within each intent.
     Cluster count k scales dynamically with intent size.
@@ -208,6 +206,7 @@ def semantic_analysis(df, dataset_name, device="cuda", target_cluster_size=50, m
     Args:
         df                  (pd.DataFrame): DataFrame with prompt, response, intent cols.
         dataset_name        (str):          Dataset name for cache file naming.
+        base_name           (str):          base name for cache file naming.
         device              (str):          'cuda' or 'cpu'.
         target_cluster_size (int):          Target rows per cluster (controls k).
         min_clusters        (int):          Minimum clusters per intent.
@@ -218,16 +217,15 @@ def semantic_analysis(df, dataset_name, device="cuda", target_cluster_size=50, m
         embeddings (np.ndarray):   L2-normalized embeddings.
     """
 
-    base       = get_file_basename(dataset_name)
     data_hash  = _compute_data_hash(df, dataset_name)
-    cache_file = f"{base}.{data_hash}.embeddings.npy"
+    cache_file = f"{base_name}.{data_hash}.embeddings.npy"
 
     assert device in ("cuda", "cpu"), \
         f"❌ device must be 'cuda' or 'cpu', got: '{device}'"
 
     # Cleanup stale cache
     for f in os.listdir("."):
-        if f.startswith(base) and f.endswith(".embeddings.npy") and f != cache_file:
+        if f.startswith(base_name) and f.endswith(".embeddings.npy") and f != cache_file:
             os.remove(f)
             print(f"🗑️  Removed stale cache: {f}")
 
@@ -279,7 +277,7 @@ def semantic_analysis(df, dataset_name, device="cuda", target_cluster_size=50, m
 # ============================================================
 # 5: AUDIT REPORT & VISUAL ATLAS
 # ============================================================
-def audit_report(df, dataset_name, save_json=True):
+def audit_report(df, dataset_name, base_name, save_json=True):
     """
     Computes and prints semantic audit report.
     Nature/cluster stats included only if semantic_cluster column present.
@@ -287,10 +285,10 @@ def audit_report(df, dataset_name, save_json=True):
     Args:
         df           (pd.DataFrame): DataFrame with prompt, response, intent cols.
         dataset_name (str):          Dataset name for file naming.
+        base_name    (str):          base name for file naming.
         save_json    (bool):         If True, saves report to disk.
     """
-    base         = get_file_basename(dataset_name)
-    report_file  = f"{base}.report.json"
+    report_file  = f"{base_name}.report.json"
     intent_col   = "intent"
     q_col        = "prompt"
     has_clusters = "semantic_cluster" in df.columns
@@ -299,7 +297,7 @@ def audit_report(df, dataset_name, save_json=True):
     intent_counts = df[intent_col].value_counts()
 
     print(f"\n{'='*65}")
-    print(f"📊 AUDIT REPORT: {base.upper()}")
+    print(f"📊 AUDIT REPORT: {base_name}")
     print(f"{'='*65}")
     print(f"   Records        : {len(df):,}")
     print(f"   Intents        : {df[intent_col].nunique()}")
@@ -345,7 +343,7 @@ def audit_report(df, dataset_name, save_json=True):
 
     if save_json:
         report = {
-            "meta"  : {"source": dataset_name, "base_name": base},
+            "meta"  : {"source": dataset_name, "base_name": base_name},
             "stats" : {
                 "total_rows"      : int(len(df)),
                 "unique_intents"  : int(df[intent_col].nunique()),
@@ -363,26 +361,25 @@ def audit_report(df, dataset_name, save_json=True):
         print(f"✅ audit_report saved: {report_file}\n")
 
 
-def visual_atlas(df, embeddings, dataset_name):
+def visual_atlas(df, embeddings, base_name):
     """
     Generates 3 actionable plots to inform sampling decisions.
     Plot 3 (nature distribution) shown only if semantic_cluster present.
     Saves to <basename>.atlas.png and displays inline.
 
     Args:
-        df           (pd.DataFrame): DataFrame with prompt, response, intent cols.
-        embeddings   (np.ndarray):   L2-normalized query embeddings.
-        dataset_name (str):          Dataset name for file naming.
+        df         (pd.DataFrame): DataFrame with prompt, response, intent cols.
+        embeddings (np.ndarray):   L2-normalized query embeddings.
+        base_name  (str):          Base name for file naming.
     """
-    base          = get_file_basename(dataset_name)
-    output_file   = f"{base}.atlas.png"
+    output_file   = f"{base_name}.atlas.png"
     intent_col    = "intent"
     has_clusters  = "semantic_cluster" in df.columns
     n_plots       = 3 if has_clusters else 2
     intent_counts = df[intent_col].value_counts().sort_values()
 
     fig, axes = plt.subplots(1, n_plots, figsize=(8 * n_plots, max(6, len(intent_counts) * 0.22)))
-    fig.suptitle(f"Semantic Atlas: {base.upper()}", fontsize=14, fontweight="bold")
+    fig.suptitle(f"Semantic Atlas: {base_name}", fontsize=14, fontweight="bold")
 
     # ----------------------------------------------------------------
     # Plot 1: Intent volume bar chart
@@ -438,7 +435,7 @@ def visual_atlas(df, embeddings, dataset_name):
 # ============================================================
 # 6: SAMPLER
 # ============================================================
-def sample_data(df, dataset_name, sample_size=1000, target_n_per_nature=2, random_state=42):
+def sample_data(df, base_name, sample_size=1000, target_n_per_nature=2, random_state=42):
     """
     Samples dataset using squeeze logic — importance-weighted per nature.
     Prints sampling summary inline. Saves <basename>.sampled_report.json.
@@ -446,7 +443,7 @@ def sample_data(df, dataset_name, sample_size=1000, target_n_per_nature=2, rando
 
     Args:
         df                  (pd.DataFrame): DataFrame with semantic_cluster.
-        dataset_name        (str):          Dataset name for file naming.
+        base_name           (str):          Base name for file naming.
         sample_size         (int):          Target number of rows.
         target_n_per_nature (int):          Target samples per nature cluster.
         random_state        (int):          Random seed.
@@ -457,8 +454,7 @@ def sample_data(df, dataset_name, sample_size=1000, target_n_per_nature=2, rando
     assert "semantic_cluster" in df.columns, \
         "❌ semantic_cluster missing — run semantic_analysis() first"
 
-    base        = get_file_basename(dataset_name)
-    report_file = f"{base}.sampled_report.json"
+    report_file = f"{base_name}.sampled_report.json"
     intent_col  = "intent"
     q_col       = "prompt"
 
@@ -594,20 +590,19 @@ def validate_sample(df_original, df_sampled):
 
     print(f"{'='*55}\n")
 
-def sampling_report(df_original, df_sampled, dataset_name):
+def sampling_report(df_original, df_sampled, base_name):
     """
     Generates sampling quality report — JSON + intent distribution plot.
     Compares original vs sampled intent distribution side by side.
     Saves <basename>.sampling_report.json and <basename>.sampling.png.
 
     Args:
-        df_original  (pd.DataFrame): Full original DataFrame.
-        df_sampled   (pd.DataFrame): Sampled DataFrame.
-        dataset_name (str):          Dataset name for file naming.
+        df_original (pd.DataFrame): Full original DataFrame.
+        df_sampled  (pd.DataFrame): Sampled DataFrame.
+        base_name   (str):          Base name for file naming.
     """
-    base        = get_file_basename(dataset_name)
-    report_file = f"{base}.sampling_report.json"
-    plot_file   = f"{base}.sampling.png"
+    report_file = f"{base_name}.sampling_report.json"
+    plot_file   = f"{base_name}.sampling.png"
     intent_col  = "intent"
     has_clusters= "semantic_cluster" in df_sampled.columns
 
@@ -668,7 +663,7 @@ def sampling_report(df_original, df_sampled, dataset_name):
     y           = range(n)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, max(6, n * 0.25)), sharey=True)
-    fig.suptitle(f"Sampling Report: {base.upper()}", fontsize=13, fontweight="bold")
+    fig.suptitle(f"Sampling Report: {base_name}", fontsize=13, fontweight="bold")
 
     # Original
     axes[0].barh(list(y), orig_vals, color="steelblue", alpha=0.8)
@@ -770,25 +765,14 @@ def split_data(df, training_cols, test_size=0.10, val_size=0.10, random_state=42
 # ============================================================
 # 8: SAVE & COLLECT DATA FILES
 # ============================================================
-def save_sampled_data(df, dataset_name):
-    base     = get_file_basename(dataset_name)
-    out_file = f"{base}.sampled.jsonl"
+def save_sampled_data(df, base_name):
+    out_file = f"{base_name}.sampled.jsonl"
     df.to_json(out_file, orient="records", lines=True)
     print(f"✅ save_sampled_data: {len(df):,} rows → {out_file}")
 
 
-def save_splits(dataset_dict, dataset_name):
-    base = get_file_basename(dataset_name)
+def save_splits(dataset_dict, base_name):
     for split, ds in dataset_dict.items():
-        out_file = f"{base}.{split}.jsonl"
+        out_file = f"{base_name}.{split}.jsonl"
         ds.to_json(out_file)
         print(f"✅ {split:<10} → {out_file}  ({len(ds):,} rows)")
-
-
-def collect_generated_files(dataset_name):
-    base = get_file_basename(dataset_name)
-    generated_files = sorted([
-        f for f in os.listdir(".")
-        if os.path.isfile(f) and f.startswith(base)
-    ])
-    return generated_files

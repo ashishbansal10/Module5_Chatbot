@@ -195,6 +195,7 @@ def sync_to_colab_drive(file_list, drive_folder='IITD_AIML', source_path='/conte
 
     # 1. Exit early if not in Colab
     if 'google.colab' not in sys.modules:
+        print("⚠️  Not running in Colab — skipping Drive sync.")
         return None
 
     from google.colab import drive
@@ -203,7 +204,7 @@ def sync_to_colab_drive(file_list, drive_folder='IITD_AIML', source_path='/conte
 
     # 2. Mount Drive if not already mounted
     mount_point = '/content/drive'
-    if not os.path.exists(mount_point):
+    if not os.path.exists(os.path.join(mount_point, 'MyDrive')):
         drive.mount(mount_point)
 
     # 3. Define the local path to your Google Drive folder
@@ -211,23 +212,28 @@ def sync_to_colab_drive(file_list, drive_folder='IITD_AIML', source_path='/conte
     drive_local_path = os.path.join(mount_point, 'MyDrive', drive_folder)
 
     # 4. Create destination folder if it doesn't exist
-    if not os.path.exists(drive_local_path):
-        os.makedirs(drive_local_path)
-        print(f"📁 Created folder: {drive_local_path}")
+    os.makedirs(drive_local_path, exist_ok=True)
+    print(f"📁 Destination: {drive_local_path}")
 
     # 5. Copy files
-    for file_name in file_list:
-        src = os.path.join(source_path, file_name)
-        dst = os.path.join(drive_local_path, file_name)
+    for item in file_list:
+        src = item if os.path.isabs(item) else os.path.join(source_path, item)
+        dst = os.path.join(drive_local_path, os.path.basename(item))
 
-        if os.path.exists(src):
+        if os.path.isdir(src):
+            try:
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+                print(f"✅ Dir  copied : {item} → Drive")
+            except Exception as e:
+                print(f"❌ Error copying dir {item}: {e}")
+        elif os.path.isfile(src):
             try:
                 shutil.copy2(src, dst)
-                print(f"✅ Success: {file_name} -> Drive")
+                print(f"✅ File copied : {item} → Drive")
             except Exception as e:
-                print(f"❌ Error copying {file_name}: {e}")
+                print(f"❌ Error copying file {item}: {e}")
         else:
-            print(f"⚠️ Warning: {file_name} not found at {source_path}")
+            print(f"⚠️  Not found  : {src}")
 
     print(f"📍 Local Drive Path: {drive_local_path}")
     print(f"🔗 Web Access: https://drive.google.com/drive/u/0/my-drive")

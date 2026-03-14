@@ -140,7 +140,7 @@ CHAT_STYLE_CONFIG = {
 
 MODEL_CONFIGS = {
     "distilgpt2": {
-        "model_id":       "distilgpt2",
+        "model_name":     "distilgpt2",
         "use_4bit":       False,
         "use_8bit":       False,
         "target_modules": ["c_attn", "c_proj"],
@@ -162,7 +162,7 @@ MODEL_CONFIGS = {
         "system_prompt":  None,             # conversational doesn't support system prompt
     },
     "tinyllama": {
-        "model_id":       "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "model_name":     "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "use_4bit":       True,
         "use_8bit":       False,
         "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -404,7 +404,7 @@ def load_model_and_tokenizer(
     based on chat_style in model_config.
     
     Args:
-        model_id     (str):          HuggingFace model path.
+        model_id     (str):          Unique Model ID to look into MODEL_CONFIGS
         model_config (dict):         Model config from MODEL_CONFIGS.
         device       (torch.device): Execution device (e.g. 'cuda', 'cpu').
         debug        (bool):         If True, prints model architecture and config.
@@ -420,6 +420,11 @@ def load_model_and_tokenizer(
         "❌ model_id is empty or None!"
     assert model_config is not None, \
         "❌ model_config is None!"
+    
+    model_name = model_config.get("model_name", None)
+    assert model_name is not None and model_name != "", \
+        f"❌ model_name is empty or None for model '{model_id}'!"
+
     assert device is not None and device != "", \
         "❌ device is empty or None!"
     assert model_config.get("chat_style") in CHAT_STYLE_CONFIG, \
@@ -428,6 +433,7 @@ def load_model_and_tokenizer(
     print(f"\n{'='*50}")
     print(f"🚀 load_model_and_tokenizer")
     print(f"   model_id   : {model_id}")
+    print(f"   model_name : {model_name}")
     print(f"   device     : {device}")
     print(f"   chat_style : {model_config.get('chat_style')}")
     print(f"   debug      : {debug}")
@@ -445,7 +451,7 @@ def load_model_and_tokenizer(
     # Step 3: Load tokenizer
     # ----------------------------------------------------------------
     tokenizer = AutoTokenizer.from_pretrained(
-        model_id,
+        model_name,
         trust_remote_code=True
     )
     print(f"✅ Tokenizer loaded.")
@@ -477,7 +483,7 @@ def load_model_and_tokenizer(
     # Step 5: Load model
     # ----------------------------------------------------------------
     model = AutoModelForCausalLM.from_pretrained(
-        model_id,
+        model_name,
         quantization_config=bnb_config,
         dtype=model_dtype,
         device_map=device_map,
@@ -511,6 +517,7 @@ def load_model_and_tokenizer(
     print(f"\n{'='*50}")
     print(f"🚀 MODEL INITIALIZED")
     print(f"   📦 model_id              : {model_id}")
+    print(f"   📦 model_name            : {model_name}")
     print(f"   📍 Device / device_map   : {device} / {device_map}")
     print(f"   🔢 Precision             : {model_dtype}")
     print(f"   💎 Quant                 : {quant_label}")
