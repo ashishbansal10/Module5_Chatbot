@@ -32,6 +32,15 @@ from transformers import TextIteratorStreamer
 from model_loader import CHAT_STYLE_CONFIG, MODEL_CONFIGS, build_prompt, get_stop_strings
 
 
+__all__ = [
+    "ChatResponse",
+    "generate_response",
+    "generate_response_streaming",
+    "generate_response_batch",
+    "evaluate_dataset",
+]
+
+
 # ─────────────────────────────────────────────────────────────
 # ChatResponse dataclass
 # ─────────────────────────────────────────────────────────────
