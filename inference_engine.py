@@ -26,6 +26,7 @@ Public API
 import time
 from threading import Thread
 from dataclasses import dataclass, field
+from tqdm import tqdm
 import torch
 from transformers import TextIteratorStreamer
 
@@ -303,7 +304,10 @@ def generate_response_batch(
         )
 
     results = []
-    for i, query in enumerate(queries, 1):
+    iter_queries = tqdm(enumerate(queries, 1), total=len(queries), desc="Generating") \
+                        if verbose >= 1 else enumerate(queries, 1)
+
+    for i, query in iter_queries:
         ref = references[i - 1] if references is not None else None
         if verbose >= 2:
             print(f"  [{i}/{len(queries)}] {query[:70]}{'…' if len(query) > 70 else ''}")
