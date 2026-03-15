@@ -25,20 +25,25 @@ def _ensure_torch():
 def _ensure_gradio():
     try:
         import gradio as gr
-        # Check minimum version
         from packaging import version
-        if version.parse(gr.__version__) < version.parse("6.0.0"):
-            print(f"⚠️  Gradio {gr.__version__} found — upgrading to 6.0+...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio>=6.0.0", "-q"])
+        if version.parse(gr.__version__) < version.parse("5.0.0"):
+            print(f"⚠️  Gradio {gr.__version__} found — upgrading to 5.0+...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio>=5.0.0", "-q"])
+        else:
+            print(f"✅ gradio                         : {gr.__version__}")
     except ImportError:
         print("gradio not found — installing...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio>=6.0.0", "-q"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio>=5.0.0", "-q"])
 
 _ensure_torch()
 _ensure_gradio()
 
 import torch
 import gradio as gr
+
+from packaging import version
+GRADIO_V6 = version.parse(gr.__version__) >= version.parse("6.0.0")
+print(f"✅ gradio : {gr.__version__}  ({'v6+' if GRADIO_V6 else 'v5'})")
 
 
 from model_loader   import MODEL_CONFIGS, load_inference_model
@@ -452,7 +457,10 @@ def build_ui(config, device, debug=False):
 
     about_md = build_about_md(config, device)
 
-    with gr.Blocks(title="Customer Support Chatbot") as demo:
+    block_kwargs = {"title": "Customer Support Chatbot"}
+    if not GRADIO_V6:
+        block_kwargs["theme"] = gr.themes.Soft()
+    with gr.Blocks(**block_kwargs) as demo:
 
         # ── App header ────────────────────────────────────────
         with gr.Row():
@@ -486,7 +494,10 @@ def build_ui(config, device, debug=False):
                     )
                     chk_hist  = gr.Checkbox(value=False, label="Remember conversation history", scale=1, container=True)
 
-                chatbot = gr.Chatbot(label="Conversation", height=420)
+                chatbot_kwargs = {"label": "Conversation", "height": 420}
+                if not GRADIO_V6:
+                    chatbot_kwargs["bubble_full_width"] = False
+                chatbot = gr.Chatbot(**chatbot_kwargs)
 
                 with gr.Row():
                     chat_in   = gr.Textbox(placeholder="Type your message…", show_label=False, scale=5)
@@ -632,14 +643,16 @@ def main():
     print(f"   Device      : {device}")
 
     demo = build_ui(config, device, debug=args.debug)
+    launch_kwargs = {
+        "server_port" : args.port,
+        "share"       : args.share,
+        "server_name" : "0.0.0.0",
+        "inbrowser"   : args.inbrowser,
+    }
+    if GRADIO_V6:
+        launch_kwargs["theme"] = gr.themes.Soft()
     demo.queue(max_size=3)
-    demo.launch(
-        server_port = args.port,
-        share       = args.share,
-        server_name = "0.0.0.0",
-        theme       = gr.themes.Soft(),
-        inbrowser   = args.inbrowser
-    )
+    demo.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":
