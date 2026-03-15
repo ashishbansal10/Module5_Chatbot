@@ -7,6 +7,7 @@ Used by both Bansal_Ashish_IITD_AIML05_Module5_chatbot.ipynb and gradio_app.py.
 import os
 import json
 import re
+import time
 import hashlib
 import subprocess
 import sys
@@ -133,9 +134,12 @@ def upsert_gradio_config(
         }
 
     # Run entry — upsert under model > runs > dataset_key
+    config_dir   = os.path.dirname(os.path.abspath(config_path))
+    rel_dump_dir = os.path.relpath(model_dump_dir, config_dir)
+
     config["models"][model_id]["runs"][dataset_key] = {
-        "model_dump_dir":  model_dump_dir,
-        "best_model_path": best_model_path,
+        "model_dump_dir":  rel_dump_dir,
+        "best_model_path": os.path.join(rel_dump_dir, "best_model"),
     }
 
     save_gradio_config(config, config_path)
@@ -209,8 +213,10 @@ def list_available_runs(config_path="gradio_config.json"):
 def launch_gradio(
     config_path = "gradio_config.json",
     port        = 7860,
-    share       = False,
+    share       = True,
+    inbrowser   = True,
     detach      = True,
+    log_file    = "gradio.log"
 ):
     """
     Launch gradio_app.py as a subprocess.
@@ -224,16 +230,29 @@ def launch_gradio(
     ]
     if share:
         cmd.append("--share")
+    if inbrowser:
+        cmd.append("--inbrowser")
 
     if detach:
+        log = open(log_file, "w") if log_file else subprocess.DEVNULL
         proc = subprocess.Popen(
             cmd,
+            stdout            = log,
+            stderr            = log,
             start_new_session = True,  # detach from parent process group
         )
         print(f"✅ Gradio launched (PID: {proc.pid})")
         print(f"   Local  : http://localhost:{port}")
         if share:
-            print(f"   Public : URL will appear in output below...")
+            print(f"   Waiting for public URL...")
+            time.sleep(15)
+            try:
+                with open(log_file) as f:
+                    for line in f:
+                        if "gradio.live" in line or "127.0.0.1" in line:
+                            print(f"   {line.strip()}")
+            except Exception:
+                print(f"   Check {log_file} for public URL")
         return proc
     else:
         subprocess.run(cmd)

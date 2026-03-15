@@ -47,4 +47,4 @@ tqdm
 squarify
 
 # --- AI UI ---
-gradio
+gradio>=6.0.0

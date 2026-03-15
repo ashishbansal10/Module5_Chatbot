@@ -21,15 +21,24 @@ def _ensure_torch():
     except ImportError:
         print("torch not found — installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "torch", "-q"])
-_ensure_torch()
 
 def _ensure_gradio():
     try:
         import gradio as gr
+        # Check minimum version
+        from packaging import version
+        if version.parse(gr.__version__) < version.parse("6.0.0"):
+            print(f"⚠️  Gradio {gr.__version__} found — upgrading to 6.0+...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio>=6.0.0", "-q"])
     except ImportError:
         print("gradio not found — installing...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio", "-q"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "gradio>=6.0.0", "-q"])
+
+_ensure_torch()
 _ensure_gradio()
+
+import torch
+import gradio as gr
 
 
 from model_loader   import MODEL_CONFIGS, load_inference_model
@@ -52,8 +61,9 @@ def parse_args():
     p = argparse.ArgumentParser(description="Customer Support Chatbot — Gradio App")
     p.add_argument("--config", default="gradio_config.json")
     p.add_argument("--port",   type=int, default=7860)
-    p.add_argument("--share",  action="store_true")
-    p.add_argument("--debug",  action="store_true")
+    p.add_argument("--share",     action="store_true", default=True)
+    p.add_argument("--inbrowser", action="store_true", default=True)
+    p.add_argument("--debug",     action="store_true", default=False)
     return p.parse_args()
 
 
@@ -214,7 +224,7 @@ def chat_respond(
 
     model_id, dataset_key = _parse_run_label(run_label, STATE.available_runs)
     if model_id is None:
-        yield history + [[message, "⚠️  No model selected."]]
+        yield history + [{"role": "user", "content": message}, {"role": "assistant", "content": "⚠️  No model selected."}]
         return
 
     # Ensure model is loaded
@@ -224,7 +234,11 @@ def chat_respond(
     # Build history for multi-turn
     history_pairs = None
     if use_history and history:
-        history_pairs = [(h[0], h[1]) for h in history if h[1] is not None]
+        history_pairs = [
+            (history[i]["content"], history[i+1]["content"])
+            for i in range(0, len(history)-1, 2)
+            if history[i]["role"] == "user"
+        ]
 
     partial = ""
     for chunk in generate_response_streaming(
@@ -241,7 +255,8 @@ def chat_respond(
         device              = STATE.device,
     ):
         partial += chunk
-        yield history + [[message, partial]]
+        yield history + [{"role": "user", "content": message}, {"role": "assistant", "content": partial}]
+
 
 
 def chat_clear(_history):
@@ -351,8 +366,11 @@ def compare_two_models(
 # Tab 4 — About content builder
 # ─────────────────────────────────────────────────────────────
 
-def build_about_md(config):
+def build_about_md(config, device):
     """Build markdown string for the About tab from config and metrics files."""
+    import gradio as gr
+    import torch
+
     lines = []
 
     # Author
@@ -395,6 +413,14 @@ def build_about_md(config):
                         f"BLEU: {metrics.get('bleu','N/A')}  "
                         f"Cosine: {metrics.get('mean_cos_sim','N/A')}"
                     )
+
+        # Runtime info at the end
+        lines.append("---")
+        lines.append("## Runtime Info")
+        lines.append(f"- **Gradio:** {gr.__version__}")
+        lines.append(f"- **PyTorch:** {torch.__version__}")
+        lines.append(f"- **Device:** {str(device)}")
+
         lines.append("")
 
     return "\n".join(lines)
@@ -424,20 +450,21 @@ def build_ui(config, device, debug=False):
         mod_id, dk, _ = STATE.available_runs[0]
         first_samples = STATE.get_sample_queries(mod_id, dk)
 
-    about_md = build_about_md(config)
+    about_md = build_about_md(config, device)
 
-    with gr.Blocks(title="Customer Support Chatbot", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Customer Support Chatbot") as demo:
 
         # ── App header ────────────────────────────────────────
-        gr.Markdown("# Customer Support Chatbot")
-        gr.Markdown(
-            "Fine-tuned with LoRA · "
-            f"Model: **{STATE.model_id or 'None'}** · "
-            f"Device: **{str(device)}**"
-        )
+        with gr.Row():
+            gr.Markdown(
+                "# 🤖 Customer Support Chatbot\n"
+                f"Fine-tuned with LoRA · Model: **{STATE.model_id or 'None'}** · Device: **{str(device)}**"
+            )
+            stop_btn = gr.Button("⏹  Stop Server", variant="stop", scale=0, min_width=140)
+        stop_btn.click(fn=lambda: os._exit(0), inputs=[], outputs=[])
 
         # ── Shared generation params (always visible) ─────────
-        with gr.Accordion("Generation Parameters", open=False):
+        with gr.Accordion("Generation Parameters", open=True):
             with gr.Row():
                 s_temp   = gr.Slider(0.0, 1.5,  value=DEFAULT_TEMP,   step=0.05, label="Temperature")
                 s_top_p  = gr.Slider(0.5, 1.0,  value=DEFAULT_TOP_P,  step=0.05, label="Top-p")
@@ -457,9 +484,9 @@ def build_ui(config, device, debug=False):
                         choices=run_labels, value=first_label,
                         label="Model / Dataset", scale=3
                     )
-                    chk_hist  = gr.Checkbox(value=False, label="Remember conversation history", scale=1)
+                    chk_hist  = gr.Checkbox(value=False, label="Remember conversation history", scale=1, container=True)
 
-                chatbot = gr.Chatbot(label="Conversation", height=420, bubble_full_width=False)
+                chatbot = gr.Chatbot(label="Conversation", height=420)
 
                 with gr.Row():
                     chat_in   = gr.Textbox(placeholder="Type your message…", show_label=False, scale=5)
@@ -508,12 +535,12 @@ def build_ui(config, device, debug=False):
                 with gr.Row():
                     with gr.Column():
                         gr.Markdown("#### Base model")
-                        cmp1_base_out  = gr.Textbox(label="Response", lines=6, interactive=False)
                         cmp1_base_meta = gr.Textbox(label="Stats",    interactive=False)
+                        cmp1_base_out  = gr.Textbox(label="Response", lines=10, max_lines=10, interactive=False)
                     with gr.Column():
                         gr.Markdown("#### Fine-tuned model")
-                        cmp1_ft_out    = gr.Textbox(label="Response", lines=6, interactive=False)
                         cmp1_ft_meta   = gr.Textbox(label="Stats",    interactive=False)
+                        cmp1_ft_out  = gr.Textbox(label="Response", lines=10, max_lines=10, interactive=False)
 
                 def _cmp1(*args):
                     return compare_base_ft(*args, device)
@@ -537,12 +564,12 @@ def build_ui(config, device, debug=False):
                 with gr.Row():
                     with gr.Column():
                         gr.Markdown("#### Model A")
-                        cmp2_m1_out  = gr.Textbox(label="Response", lines=6, interactive=False)
                         cmp2_m1_meta = gr.Textbox(label="Stats",    interactive=False)
+                        cmp2_m1_out  = gr.Textbox(label="Response", lines=10, max_lines=10, interactive=False)
                     with gr.Column():
                         gr.Markdown("#### Model B")
-                        cmp2_m2_out  = gr.Textbox(label="Response", lines=6, interactive=False)
                         cmp2_m2_meta = gr.Textbox(label="Stats",    interactive=False)
+                        cmp2_m2_out  = gr.Textbox(label="Response", lines=10, max_lines=10, interactive=False)
 
                 def _cmp2(*args):
                     return compare_two_models(*args, device)
@@ -556,6 +583,7 @@ def build_ui(config, device, debug=False):
             # ── Tab 4: About ──────────────────────────────────
             with gr.TabItem("ℹ️ About"):
                 gr.Markdown(about_md)
+
 
         # ── Footer ────────────────────────────────────────────
         author = config.get("author", {})
@@ -609,6 +637,8 @@ def main():
         server_port = args.port,
         share       = args.share,
         server_name = "0.0.0.0",
+        theme       = gr.themes.Soft(),
+        inbrowser   = args.inbrowser
     )
 
 

@@ -108,7 +108,14 @@ def analyze_data(df, base_name):
     # Intent summary
     intent_counts_display = df[intent_col].value_counts().sort_index()
     print(f"\n--- intents ({df[intent_col].nunique()}) ---")
-    for intent, count in intent_counts_display.items():
+    print(f"   Avg q/intent : {intent_counts_display.mean():.1f}")
+    top3    = intent_counts_display.sort_values(ascending=False).head(3)
+    bottom3 = intent_counts_display.sort_values(ascending=False).tail(3)
+    print(f"   Top 3:")
+    for intent, count in top3.items():
+        print(f"   {intent:<40} : {count:>5,}")
+    print(f"   Bottom 3:")
+    for intent, count in bottom3.items():
         print(f"   {intent:<40} : {count:>5,}")
 
     # Intent distribution
@@ -138,7 +145,7 @@ def analyze_data(df, base_name):
     axes[1].legend(fontsize=8)
 
     balance_ratio = intent_counts.min() / intent_counts.max()
-    label         = "✅ Balanced" if balance_ratio > 0.5 else "⚠️ Imbalanced"
+    label         = "Balanced" if balance_ratio > 0.5 else "⚠️ Imbalanced"
     fig.text(0.5, 0.01, f"{label} (min/max ratio: {balance_ratio:.2f})",
              ha="center", fontsize=11)
 
@@ -197,7 +204,7 @@ def _compute_data_hash(df, dataset_name):
     return hashlib.md5(combined.encode()).hexdigest()[:8]
 
 
-def semantic_analysis(df, dataset_name, base_name, device="cuda", target_cluster_size=50, min_clusters=2, max_clusters=20):
+def semantic_analysis(df, dataset_name, cache_base_name, device="cuda", target_cluster_size=50, min_clusters=2, max_clusters=20):
     """
     Encodes queries, L2-normalizes, and clusters within each intent.
     Cluster count k scales dynamically with intent size.
@@ -206,7 +213,7 @@ def semantic_analysis(df, dataset_name, base_name, device="cuda", target_cluster
     Args:
         df                  (pd.DataFrame): DataFrame with prompt, response, intent cols.
         dataset_name        (str):          Dataset name for cache file naming.
-        base_name           (str):          base name for cache file naming.
+        cache_base_name     (str):          base name for cache file naming. Pass None to disable.
         device              (str):          'cuda' or 'cpu'.
         target_cluster_size (int):          Target rows per cluster (controls k).
         min_clusters        (int):          Minimum clusters per intent.
@@ -217,23 +224,22 @@ def semantic_analysis(df, dataset_name, base_name, device="cuda", target_cluster
         embeddings (np.ndarray):   L2-normalized embeddings.
     """
 
-    data_hash  = _compute_data_hash(df, dataset_name)
-    cache_file = f"{base_name}.{data_hash}.embeddings.npy"
-
-    assert device in ("cuda", "cpu"), \
-        f"❌ device must be 'cuda' or 'cpu', got: '{device}'"
-
-    # Cleanup stale cache
-    for f in os.listdir("."):
-        if f.startswith(base_name) and f.endswith(".embeddings.npy") and f != cache_file:
-            os.remove(f)
-            print(f"🗑️  Removed stale cache: {f}")
-
     q_col      = "prompt"
     intent_col = "intent"
 
+    cache_file = None
+    if cache_base_name is not None:
+        data_hash  = _compute_data_hash(df, dataset_name)
+        cache_file = f"{cache_base_name}.{data_hash}.embeddings.npy"
+
+        # Cleanup stale cache
+        for f in os.listdir("."):
+            if f.startswith(cache_base_name) and f.endswith(".embeddings.npy") and f != cache_file:
+                os.remove(f)
+                print(f"🗑️  Removed stale cache: {f}")
+
     # Encode or load normalized cache
-    if os.path.exists(cache_file):
+    if cache_file is not None and os.path.exists(cache_file):
         embeddings = np.load(cache_file)
         print(f"✅ Embeddings loaded from cache: {cache_file}")
     else:
@@ -246,8 +252,11 @@ def semantic_analysis(df, dataset_name, base_name, device="cuda", target_cluster
             batch_size        = batch_size
         )
         embeddings = normalize(raw)          # L2 normalize before caching
-        np.save(cache_file, embeddings)
-        print(f"✅ Embeddings encoded, normalized, cached: {cache_file}")
+
+        if cache_file is not None:
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            np.save(cache_file, embeddings)
+            print(f"✅ Embeddings encoded, normalized, cached: {cache_file}")
 
     # Dynamic k clustering per intent
     df         = df.copy()
@@ -277,93 +286,214 @@ def semantic_analysis(df, dataset_name, base_name, device="cuda", target_cluster
 # ============================================================
 # 5: AUDIT REPORT & VISUAL ATLAS
 # ============================================================
-def audit_report(df, dataset_name, base_name, save_json=True):
+def _build_data_report(
+    df_original,
+    dataset_name,
+    base_name,
+    report_file,
+    save_json  = True,
+    df_sampled = None,
+):
     """
-    Computes and prints semantic audit report.
-    Nature/cluster stats included only if semantic_cluster column present.
-
-    Args:
-        df           (pd.DataFrame): DataFrame with prompt, response, intent cols.
-        dataset_name (str):          Dataset name for file naming.
-        base_name    (str):          base name for file naming.
-        save_json    (bool):         If True, saves report to disk.
+    Core report builder for audit and sampling modes.
+    df_sampled=None → audit mode. df_sampled=DataFrame → sampling mode.
     """
-    report_file  = f"{base_name}.report.json"
+    is_sampling  = df_sampled is not None
     intent_col   = "intent"
-    q_col        = "prompt"
-    has_clusters = "semantic_cluster" in df.columns
-
-    df            = df.copy()
-    intent_counts = df[intent_col].value_counts()
-
-    print(f"\n{'='*65}")
-    print(f"📊 AUDIT REPORT: {base_name}")
-    print(f"{'='*65}")
-    print(f"   Records        : {len(df):,}")
-    print(f"   Intents        : {df[intent_col].nunique()}")
-    print(f"   Avg Q/Intent   : {intent_counts.mean():.1f}  "
-          f"(min={intent_counts.min()}, max={intent_counts.max()})")
-    balance_ratio = intent_counts.min() / intent_counts.max()
-    balance_label = "✅ Balanced" if balance_ratio > 0.5 else "⚠️  Imbalanced"
-    print(f"   Balance Ratio  : {balance_ratio:.2f}  {balance_label}")
-
-    # Intent table
-    print(f"\n   {'Intent':<40} | {'Queries':>7}")
-    print(f"   {'-'*52}")
-    for intent, count in intent_counts.items():
-        print(f"   {intent:<40} | {count:>7,}")
-
-    # Nature stats — only if semantic_cluster present
+    has_clusters = "semantic_cluster" in df_original.columns
+ 
+    # ── Base counts ───────────────────────────────────────────
+    orig_counts    = df_original[intent_col].value_counts().sort_values(ascending=False)
+    sampled_counts = df_sampled[intent_col].value_counts() if is_sampling else None
+ 
+    # ── Nature info ───────────────────────────────────────────
     if has_clusters:
-        df["_nature"] = df[intent_col].astype(str) + "_n" + df["semantic_cluster"].astype(str)
-        diversity     = df.groupby(intent_col)["_nature"].nunique()
-        total_natures = df["_nature"].nunique()
-        nature_sizes  = df.groupby("_nature").size()
-
-        print(f"\n   Natures        : {total_natures}")
-        print(f"   Avg Q/Nature   : {len(df)/total_natures:.1f}  "
-              f"(min={nature_sizes.min()}, max={nature_sizes.max()})")
-        print(f"   Avg Natures/Intent : {diversity.mean():.1f}")
-
-        print(f"\n   {'Intent':<40} | {'Natures':>7} | {'Queries':>7}")
-        print(f"   {'-'*60}")
-        for intent in diversity.sort_values(ascending=False).head(10).index:
-            print(f"   {intent:<40} | {diversity[intent]:>7} | {intent_counts[intent]:>7,}")
-
-        print(f"\n   Top Natures (by density):")
-        for nature, count in df["_nature"].value_counts().head(5).items():
-            examples = df[df["_nature"] == nature][q_col].head(2).tolist()
-            print(f"\n   [{nature}] — {count} queries")
-            for ex in examples:
-                print(f"     > {ex}")
-    else:
-        print(f"\n   ⚠️  semantic_cluster not found — run semantic_analysis() for nature stats")
-
-    print(f"\n{'='*65}\n")
-
-    if save_json:
-        report = {
-            "meta"  : {"source": dataset_name, "base_name": base_name},
-            "stats" : {
-                "total_rows"      : int(len(df)),
-                "unique_intents"  : int(df[intent_col].nunique()),
-                "intent_densities": intent_counts.to_dict(),
-                "balance_ratio"   : round(balance_ratio, 3),
-            }
+        orig_natures_per_intent = df_original.groupby(intent_col)["semantic_cluster"].nunique()
+        orig_nature_sizes       = df_original.groupby([intent_col, "semantic_cluster"]).size()
+        total_natures           = df_original.groupby([intent_col, "semantic_cluster"]).ngroups
+        avg_natures_per_intent  = round(float(orig_natures_per_intent.mean()), 2)
+        avg_q_per_nature        = round(len(df_original) / total_natures, 1)
+        min_nature_size         = int(orig_nature_sizes.min())
+        max_nature_size         = int(orig_nature_sizes.max())
+ 
+        if is_sampling:
+            sampled_natures_per_intent = df_sampled.groupby(intent_col)["semantic_cluster"].nunique()
+            sampled_total_natures      = df_sampled.groupby([intent_col, "semantic_cluster"]).ngroups
+ 
+    # ── Balance ───────────────────────────────────────────────
+    balance_ratio         = round(orig_counts.min() / orig_counts.max(), 3)
+    balance_label         = "✅ Balanced" if balance_ratio > 0.5 else "⚠️  Imbalanced"
+    avg_q_per_intent      = round(len(df_original) / df_original[intent_col].nunique(), 1)
+    top3                  = orig_counts.head(3)
+    bottom3               = orig_counts.tail(3)
+ 
+    if is_sampling:
+        sampled_balance_ratio = round(sampled_counts.min() / sampled_counts.max(), 3)
+        sampled_balance_label = "✅ Balanced" if sampled_balance_ratio > 0.5 else "⚠️  Imbalanced"
+ 
+    # ── Intent distribution list ──────────────────────────────
+    intent_distribution = []
+    for intent in orig_counts.index:
+        entry = {
+            "intent" : intent,
+            "count"  : int(orig_counts[intent]),
         }
         if has_clusters:
-            report["stats"].update({
-                "total_unique_natures"  : int(total_natures),
-                "avg_natures_per_intent": round(float(diversity.mean()), 2),
-            })
+            n_nat = int(orig_natures_per_intent.get(intent, 0))
+            entry["num_natures"]     = n_nat
+            entry["avg_q_per_nature"] = round(
+                orig_counts[intent] / n_nat, 1
+            ) if n_nat > 0 else 0
+        if is_sampling:
+            s_count = int(sampled_counts.get(intent, 0))
+            entry["sampled_count"]   = s_count
+            entry["retention_pct"]   = round(s_count / orig_counts[intent] * 100, 1)
+            if has_clusters:
+                s_nat = int(sampled_natures_per_intent.get(intent, 0))
+                entry["sampled_natures"]      = s_nat
+                entry["nature_coverage_pct"]  = round(
+                    s_nat / orig_natures_per_intent.get(intent, 1) * 100, 1
+                )
+        intent_distribution.append(entry)
+ 
+    # ── Build JSON ────────────────────────────────────────────
+    report = {}
+ 
+    report["meta"] = {
+        "base_name"  : base_name,
+        "source"     : dataset_name,
+    }
+ 
+    report["data_summary"] = {
+        "original_rows"  : int(len(df_original)),
+        "total_intents"  : int(df_original[intent_col].nunique()),
+        **({"total_natures": int(total_natures)} if has_clusters else {}),
+        **({"sampled_rows"  : int(len(df_sampled)),
+            "squeeze_factor": round(len(df_original) / len(df_sampled), 1),
+            "reduction_pct" : round(100 - len(df_sampled) / len(df_original) * 100, 2),
+           } if is_sampling else {}),
+    }
+ 
+    report["intent_summary"] = {
+        "avg_q_per_intent": avg_q_per_intent,
+        "min_intent"    : {"name": str(orig_counts.index[-1]), "count": int(orig_counts.iloc[-1])},
+        "max_intent"    : {"name": str(orig_counts.index[0]),  "count": int(orig_counts.iloc[0])},
+        "balance_ratio" : balance_ratio,
+        "top_3_intents"   : [{"intent": k, "count": int(v)} for k, v in top3.items()],
+        "bottom_3_intents": [{"intent": k, "count": int(v)} for k, v in bottom3.items()],
+        **({"sampled_intents"     : int(df_sampled[intent_col].nunique()),
+            "missing_intents"     : list(
+                set(df_original[intent_col].unique()) -
+                set(df_sampled[intent_col].unique())
+            ),
+            "intent_coverage_rate": round(
+                df_sampled[intent_col].nunique() /
+                df_original[intent_col].nunique() * 100, 2
+            ),
+            "sampled_balance_ratio": sampled_balance_ratio,
+           } if is_sampling else {}),
+    }
+ 
+    if has_clusters:
+        report["nature_summary"] = {
+            "total_natures"         : int(total_natures),
+            "avg_natures_per_intent": avg_natures_per_intent,
+            "avg_q_per_nature"      : avg_q_per_nature,
+            "min_nature_size"       : min_nature_size,
+            "max_nature_size"       : max_nature_size,
+            **({"sampled_natures"      : int(sampled_total_natures),
+                "nature_coverage_rate" : round(sampled_total_natures / total_natures * 100, 2),
+               } if is_sampling else {}),
+        }
+ 
+    report["intent_distribution"] = intent_distribution
+ 
+    # ── Save JSON ─────────────────────────────────────────────
+    if save_json:
         with open(report_file, "w") as f:
             json.dump(report, f, indent=4)
-        print(f"✅ audit_report saved: {report_file}\n")
+        print(f"✅ Report saved → {report_file}")
+ 
+    # ── Terminal print ────────────────────────────────────────
+    mode = "SAMPLING REPORT" if is_sampling else "AUDIT REPORT"
+    print(f"\n{'='*65}")
+    print(f"📊 {mode}: {base_name}")
+    print(f"{'='*65}")
+ 
+    # data_summary
+    print(f"\n── Data Summary ──")
+    print(f"   Original rows  : {len(df_original):,}")
+    if is_sampling:
+        print(f"   Sampled rows   : {len(df_sampled):,}  "
+              f"(squeeze {round(len(df_original)/len(df_sampled),1)}x, "
+              f"-{round(100 - len(df_sampled)/len(df_original)*100,1)}%)")
+    if has_clusters:
+        print(f"   Total natures  : {total_natures}")
+ 
+    # intent_summary
+    print(f"\n── Intent Summary ──")
+    print(f"   Total intents  : {df_original[intent_col].nunique()}")
+    print(f"   Avg q/intent   : {avg_q_per_intent}")
+    print(f"   Min intent     : {orig_counts.index[-1]} ({orig_counts.iloc[-1]:,})")
+    print(f"   Max intent     : {orig_counts.index[0]}  ({orig_counts.iloc[0]:,})")
+    print(f"   Balance ratio  : {balance_ratio}  {balance_label}")
+    if is_sampling:
+        print(f"   Sampled intents: {df_sampled[intent_col].nunique()} / {df_original[intent_col].nunique()}"
+              f"  (coverage {round(df_sampled[intent_col].nunique()/df_original[intent_col].nunique()*100,1)}%)")
+        missing = list(set(df_original[intent_col].unique()) - set(df_sampled[intent_col].unique()))
+        if missing:
+            print(f"   Missing intents: {missing}")
+        print(f"   Sampled balance: {sampled_balance_ratio}  {sampled_balance_label}")
+ 
+    # nature_summary
+    if has_clusters:
+        print(f"\n── Nature Summary ──")
+        print(f"   Total natures      : {total_natures}")
+        print(f"   Avg natures/intent : {avg_natures_per_intent}")
+        print(f"   Avg q/nature       : {avg_q_per_nature}")
+        print(f"   Nature size        : min={min_nature_size}  max={max_nature_size}")
+        if is_sampling:
+            print(f"   Sampled natures    : {sampled_total_natures} / {total_natures}"
+                  f"  (coverage {round(sampled_total_natures/total_natures*100,1)}%)")
+ 
+    # intent_distribution — top 3 and bottom 3
+    def _print_intent_row(entry):
+        line = f"   {entry['intent']:<40} | count: {entry['count']:>5}"
+        if has_clusters:
+            line += f"  | natures: {entry['num_natures']:>3}"
+        if is_sampling:
+            line += f"  | sampled: {entry['sampled_count']:>4} ({entry['retention_pct']}%)"
+            if has_clusters:
+                line += f"  | s_natures: {entry['sampled_natures']:>3} ({entry['nature_coverage_pct']}%)"
+        print(line)
+ 
+    print(f"\n── Top 3 Intents ──")
+    for entry in intent_distribution[:3]:
+        _print_intent_row(entry)
+ 
+    print(f"\n── Bottom 3 Intents ──")
+    for entry in intent_distribution[-3:]:
+        _print_intent_row(entry)
+ 
+    print(f"\n{'='*65}\n")
+
+
+def audit_report(df, dataset_name, base_name, save_json=True):
+    """Audit report for master dataset — terminal print + optional JSON."""
+    report_file = f"{base_name}.audit_report.json"
+    _build_data_report(
+        df_original  = df,
+        dataset_name = dataset_name,
+        base_name    = base_name,
+        report_file  = report_file,
+        save_json    = save_json,
+        df_sampled   = None,
+    )
 
 
 def visual_atlas(df, embeddings, base_name):
     """
-    Generates 3 actionable plots to inform sampling decisions.
+    Generates 2 actionable plots to inform sampling decisions.
     Plot 3 (nature distribution) shown only if semantic_cluster present.
     Saves to <basename>.atlas.png and displays inline.
 
@@ -375,56 +505,42 @@ def visual_atlas(df, embeddings, base_name):
     output_file   = f"{base_name}.atlas.png"
     intent_col    = "intent"
     has_clusters  = "semantic_cluster" in df.columns
-    n_plots       = 3 if has_clusters else 2
+    n_plots       = 2 if has_clusters else 1
     intent_counts = df[intent_col].value_counts().sort_values()
 
     fig, axes = plt.subplots(1, n_plots, figsize=(8 * n_plots, max(6, len(intent_counts) * 0.22)))
+    if n_plots == 1:
+        axes = [axes]
     fig.suptitle(f"Semantic Atlas: {base_name}", fontsize=14, fontweight="bold")
 
     # ----------------------------------------------------------------
-    # Plot 1: Intent volume bar chart
+    # Plot 1: Intent similarity heatmap
     # ----------------------------------------------------------------
-    ax1 = axes[0]
-    mean_val = intent_counts.mean()
-    ax1.barh(intent_counts.index, intent_counts.values, color="steelblue", alpha=0.8)
-    ax1.axvline(mean_val, color="red", linestyle="--", linewidth=1, label=f"Mean={mean_val:.0f}")
-    ax1.set_title("1. Intent Volume")
-    ax1.set_xlabel("Query Count")
-    ax1.legend(fontsize=8)
-    balance_ratio = intent_counts.min() / intent_counts.max()
-    label         = "✅ Balanced" if balance_ratio > 0.5 else "⚠️ Imbalanced"
-    ax1.annotate(f"{label}  (min/max={balance_ratio:.2f})",
-                 xy=(0.5, -0.04), xycoords="axes fraction",
-                 ha="center", fontsize=9)
-
-    # ----------------------------------------------------------------
-    # Plot 2: Intent similarity heatmap
-    # ----------------------------------------------------------------
-    ax2   = axes[1]
+    ax1   = axes[0]
     top10 = df[intent_col].value_counts().nlargest(10).index
     means = [embeddings[df[df[intent_col] == n].index].mean(axis=0) for n in top10]
     sim   = cosine_similarity(means)
     sns.heatmap(sim, xticklabels=top10, yticklabels=top10,
                 annot=True, fmt=".2f", cmap="magma",
-                ax=ax2, annot_kws={"size": 7})
-    ax2.set_title("2. Intent Similarity (Top 10)")
-    ax2.tick_params(axis="x", rotation=45, labelsize=7)
-    ax2.tick_params(axis="y", rotation=0,  labelsize=7)
+                ax=ax1, annot_kws={"size": 7})
+    ax1.set_title("1. Intent Similarity (Top 10)")
+    ax1.tick_params(axis="x", rotation=45, labelsize=7)
+    ax1.tick_params(axis="y", rotation=0,  labelsize=7)
 
     # ----------------------------------------------------------------
-    # Plot 3: Nature size distribution (box plot per intent)
+    # Plot 2: Nature size distribution (box plot per intent)
     # ----------------------------------------------------------------
     if has_clusters:
-        ax3          = axes[2]
+        ax2          = axes[1]
         nature_sizes = df.groupby([intent_col, "semantic_cluster"]).size().reset_index(name="count")
         top15        = df[intent_col].value_counts().nlargest(15).index
         plot_data    = nature_sizes[nature_sizes[intent_col].isin(top15)]
         sns.boxplot(data=plot_data, y=intent_col, x="count",
-                    order=top15, ax=ax3, palette="Set2", orient="h")
-        ax3.set_title("3. Nature Size Distribution (Top 15 Intents)")
-        ax3.set_xlabel("Queries per Nature")
-        ax3.set_ylabel("")
-        ax3.tick_params(axis="y", labelsize=7)
+                    order=top15, ax=ax2, hue=intent_col, palette="Set2", orient="h", legend=False)
+        ax2.set_title("2. Nature Size Distribution (Top 15 Intents)")
+        ax2.set_xlabel("Queries per Nature")
+        ax2.set_ylabel("")
+        ax2.tick_params(axis="y", labelsize=7)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(output_file, dpi=150, bbox_inches="tight")
@@ -435,7 +551,7 @@ def visual_atlas(df, embeddings, base_name):
 # ============================================================
 # 6: SAMPLER
 # ============================================================
-def sample_data(df, base_name, sample_size=1000, target_n_per_nature=2, random_state=42):
+def sample_data(df, sample_size=1000, target_n_per_nature=2, random_state=42):
     """
     Samples dataset using squeeze logic — importance-weighted per nature.
     Prints sampling summary inline. Saves <basename>.sampled_report.json.
@@ -443,7 +559,6 @@ def sample_data(df, base_name, sample_size=1000, target_n_per_nature=2, random_s
 
     Args:
         df                  (pd.DataFrame): DataFrame with semantic_cluster.
-        base_name           (str):          Base name for file naming.
         sample_size         (int):          Target number of rows.
         target_n_per_nature (int):          Target samples per nature cluster.
         random_state        (int):          Random seed.
@@ -454,9 +569,7 @@ def sample_data(df, base_name, sample_size=1000, target_n_per_nature=2, random_s
     assert "semantic_cluster" in df.columns, \
         "❌ semantic_cluster missing — run semantic_analysis() first"
 
-    report_file = f"{base_name}.sampled_report.json"
     intent_col  = "intent"
-    q_col       = "prompt"
 
     if sample_size is None or sample_size >= len(df):
         print(f"✅ sample_data: sample_size >= dataset — returning full dataset ({len(df):,} rows)")
@@ -505,32 +618,15 @@ def sample_data(df, base_name, sample_size=1000, target_n_per_nature=2, random_s
     if squeeze_factor < 1.0:
         print(f"   ⚠️  Budget squeeze active: {squeeze_factor:.2f}")
 
-    print(f"\n   Top 5 intents in sample:")
-    for intent, count in intent_counts.head(5).items():
+    print(f"\n   Top 3 intents in sample:")
+    for intent, count in intent_counts.head(3).items():
         print(f"   {intent:<40} : {count:>4} ({count/len(selected)*100:.1f}%)")
 
-    summary = {
-        "compression": {
-            "original_rows" : int(len(df)),
-            "sampled_rows"  : int(len(selected)),
-            "squeeze_factor": round(len(df) / len(selected), 1),
-            "reduction_pct" : round(100 - len(selected) / len(df) * 100, 2),
-        },
-        "retention": {
-            "original_natures": int(total_natures),
-            "sampled_natures" : int(n_natures_sampled),
-            "coverage_rate"   : round(n_natures_sampled / total_natures * 100, 2),
-        },
-        "distribution": [
-            {"intent": k, "count": int(v), "pct": round(v / len(selected) * 100, 2)}
-            for k, v in intent_counts.head(10).items()
-        ]
-    }
-    with open(report_file, "w") as f:
-        json.dump(summary, f, indent=4)
+    print(f"\n   Bottom 3 intents by volume:")
+    for intent, count in intent_counts.tail(3).items():
+        print(f"   {intent:<40} : {count:>4} ({count/len(selected)*100:.1f}%)")
 
     selected = selected.drop(columns=["_nature"])
-    print(f"\n✅ Sampling report saved: {report_file}\n")
     return selected
 
 def validate_sample(df_original, df_sampled):
@@ -590,82 +686,34 @@ def validate_sample(df_original, df_sampled):
 
     print(f"{'='*55}\n")
 
-def sampling_report(df_original, df_sampled, base_name):
-    """
-    Generates sampling quality report — JSON + intent distribution plot.
-    Compares original vs sampled intent distribution side by side.
-    Saves <basename>.sampling_report.json and <basename>.sampling.png.
 
-    Args:
-        df_original (pd.DataFrame): Full original DataFrame.
-        df_sampled  (pd.DataFrame): Sampled DataFrame.
-        base_name   (str):          Base name for file naming.
-    """
+def sampling_report(df_original, df_sampled, dataset_name, base_name, save_json=True):
+    """Sampling report — terminal print + optional JSON + distribution plot."""
     report_file = f"{base_name}.sampling_report.json"
     plot_file   = f"{base_name}.sampling.png"
-    intent_col  = "intent"
-    has_clusters= "semantic_cluster" in df_sampled.columns
-
-    orig_counts    = df_original[intent_col].value_counts().sort_index()
-    sampled_counts = df_sampled[intent_col].value_counts().sort_index()
-
-    n_natures_orig    = df_original.groupby(
-        [intent_col, "semantic_cluster"]).ngroups if has_clusters and \
-        "semantic_cluster" in df_original.columns else None
-    n_natures_sampled = df_sampled.groupby(
-        [intent_col, "semantic_cluster"]).ngroups if has_clusters else None
-
-    report = {
-        "compression": {
-            "original_rows" : int(len(df_original)),
-            "sampled_rows"  : int(len(df_sampled)),
-            "squeeze_factor": round(len(df_original) / len(df_sampled), 1),
-            "reduction_pct" : round(100 - len(df_sampled) / len(df_original) * 100, 2),
-        },
-        "intent_coverage": {
-            "original_intents" : int(df_original[intent_col].nunique()),
-            "sampled_intents"  : int(df_sampled[intent_col].nunique()),
-            "missing_intents"  : list(
-                set(df_original[intent_col].unique()) -
-                set(df_sampled[intent_col].unique())
-            ),
-        },
-        "distribution": [
-            {
-                "intent"        : intent,
-                "original_count": int(orig_counts.get(intent, 0)),
-                "sampled_count" : int(sampled_counts.get(intent, 0)),
-                "retention_pct" : round(
-                    sampled_counts.get(intent, 0) /
-                    orig_counts.get(intent, 1) * 100, 1
-                ),
-            }
-            for intent in orig_counts.index
-        ],
-    }
-    if n_natures_orig and n_natures_sampled:
-        report["nature_coverage"] = {
-            "original_natures": int(n_natures_orig),
-            "sampled_natures" : int(n_natures_sampled),
-            "coverage_rate"   : round(n_natures_sampled / n_natures_orig * 100, 2),
-        }
-
-    with open(report_file, "w") as f:
-        json.dump(report, f, indent=4)
-
-    # ----------------------------------------------------------------
-    # Plot — original vs sampled intent distribution
-    # ----------------------------------------------------------------
-    intents     = orig_counts.index.tolist()
-    orig_vals   = [orig_counts.get(i, 0)    for i in intents]
-    sample_vals = [sampled_counts.get(i, 0) for i in intents]
-    n           = len(intents)
-    y           = range(n)
-
+ 
+    _build_data_report(
+        df_original  = df_original,
+        dataset_name = dataset_name,
+        base_name    = base_name,
+        report_file  = report_file,
+        save_json    = save_json,
+        df_sampled   = df_sampled,
+    )
+ 
+    # ── Plot ──────────────────────────────────────────────────
+    intent_col     = "intent"
+    orig_counts    = df_original[intent_col].value_counts()
+    sampled_counts = df_sampled[intent_col].value_counts()
+    intents        = orig_counts.sort_values(ascending=True).index.tolist()
+    orig_vals      = [orig_counts.get(i, 0)    for i in intents]
+    sample_vals    = [sampled_counts.get(i, 0) for i in intents]
+    n              = len(intents)
+    y              = range(n)
+ 
     fig, axes = plt.subplots(1, 2, figsize=(16, max(6, n * 0.25)), sharey=True)
     fig.suptitle(f"Sampling Report: {base_name}", fontsize=13, fontweight="bold")
-
-    # Original
+ 
     axes[0].barh(list(y), orig_vals, color="steelblue", alpha=0.8)
     axes[0].axvline(sum(orig_vals)/n, color="red", linestyle="--",
                     linewidth=1, label=f"Mean={sum(orig_vals)/n:.0f}")
@@ -674,19 +722,18 @@ def sampling_report(df_original, df_sampled, base_name):
     axes[0].set_title(f"Original ({len(df_original):,} rows)")
     axes[0].set_xlabel("Query Count")
     axes[0].legend(fontsize=8)
-
-    # Sampled
+ 
     axes[1].barh(list(y), sample_vals, color="coral", alpha=0.8)
     axes[1].axvline(sum(sample_vals)/n, color="red", linestyle="--",
                     linewidth=1, label=f"Mean={sum(sample_vals)/n:.0f}")
     axes[1].set_title(f"Sampled ({len(df_sampled):,} rows)")
     axes[1].set_xlabel("Query Count")
     axes[1].legend(fontsize=8)
-
+ 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.savefig(plot_file, dpi=150, bbox_inches="tight")
     plt.show()
-    print(f"✅ sampling_report: {report_file} + {plot_file}\n")
+    print(f"✅ Sampling plot saved → {plot_file}\n")
 
 
 # ============================================================
